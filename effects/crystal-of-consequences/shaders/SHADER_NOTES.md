@@ -1,69 +1,117 @@
-# Shader Notes — Crystal of Consequences
+# Crystal of Consequences — Procedural Shader Specification v2
 
-Artistic direction and technical specification for the procedural shader
-that drives the crystal's visual transformation between Purity and Corruption.
+Full artistic direction and technical specification for the procedural
+material that drives the crystal's visual transformation between Purity
+and Corruption.
 
 ---
 
-## Purity State (CorruptionLevel = 0.0)
+## 1. Overview
 
-- Crystal-clear diamond material.
-- Fresnel effect on edges producing a bright rim light.
-- Chromatic dispersion: RGB channel split through refraction on each
-  icosahedron face.
-- Roughness = 0, Metallic = 0.2.
-- Refraction of the real camera feed through the icosahedron geometry.
-- Subtle rainbow caustics projected onto surrounding surfaces.
-
-## Corruption State (CorruptionLevel = 1.0)
-
-- Dark obsidian base color (near black: `#0A0A0A`).
-- Voronoi noise pattern generating organic crevasses and veins.
-- Emission inside crevasses: orange-red lava glow transitioning from
-  `#FF4500` to `#8B0000`.
-- Roughness = 1.0, Metallic = 0.8.
-- Micro-fractures animated via a time-based Voronoi UV offset.
-- Pulsating ember particles in cracks driven by a sin-wave emission
-  intensity curve.
-
-## Transition Logic (0.0 to 1.0)
-
-- Linear mix (`lerp`) between both material states, driven by the
-  `CorruptionLevel` float uniform.
-- At exactly 0.5 the crystal "hesitates": a subtle scale breathing effect
-  is applied via `sin(time * 2.0) * 0.02`.
-- The Voronoi corruption pattern grows from the edges inward, using
-  distance-from-center as a mask.
-- The color transition passes through deep purple (`#2D0A4E`) at the
-  midpoint.
-
-## Material Editor Implementation (Effect House)
-
-- **Input node:** `CorruptionLevel` (float, range 0 to 1) exposed via
+- Zero texture files. Everything is procedural math. Budget: **0 MB**.
+- Single input: `CorruptionLevel` (float, 0.0 → 1.0), exposed via
   "Pin to Graph" in the Material Editor.
-- **Fresnel Node** feeds into a Mix node with factor `1.0 - CorruptionLevel`.
-- **Voronoi Noise Node** feeds into the same Mix node with factor
-  `CorruptionLevel`.
-- **Time Node** offsets the Voronoi UV coordinates for animation.
-- **Emission Node** computed as
-  `CorruptionLevel * VoronoiEdge * EmberColor`.
-- **Output:** Standard PBR channels (BaseColor, Metallic, Roughness,
-  Normal, Emission).
+- Output: Standard PBR channels (BaseColor, Metallic, Roughness, Normal,
+  Emission).
+- Driven in real-time by `CrystalController.ts` via
+  `material.setFloat('CorruptionLevel', value)`.
 
-## Geometry
+---
 
-- Base mesh: Icosahedron (20 faces), approximately 5 KB.
-- Optional: Normal Map baked from a subdivided version in Blender to add
-  surface micro-detail without increasing polygon count.
-- Total texture budget: **0 MB** (everything is procedural).
+## 2. Purity State (CorruptionLevel = 0.0)
 
-## Node Graph Diagram
+- **Base Color:** Near-white with slight blue tint (`#E8F0FE`).
+- **Fresnel effect** on edges: bright rim light, intensity = 2.0,
+  power = 4.0.
+- **Refraction simulation:** Use Grab Pass (screen texture behind the
+  object) with UV distortion via normal-based offset. This simulates
+  light bending through crystal without real raytracing.
+- **Chromatic dispersion:** Split the Grab Pass into 3 channels (R, G, B)
+  with slightly different UV offsets to create rainbow edge effects.
+- **Roughness** = 0.0 (mirror-smooth surface).
+- **Metallic** = 0.2 (dielectric with slight reflection).
+- **No emission.**
+- *Note:* True refraction is impossible on mobile. The Grab Pass technique
+  gives a convincing illusion at near-zero GPU cost.
+
+---
+
+## 3. Corruption State (CorruptionLevel = 1.0)
+
+- **Base Color:** Near-black obsidian (`#0A0A0A`).
+- **Voronoi Noise:** Creates organic crevasse pattern.
+  Cell scale = 4.0, jitter = 0.8.
+- **Crevasse detection:** Use `1.0 - VoronoiDistance` through a
+  `Smoothstep(0.02, 0.08)` to isolate thin edge lines.
+- **Distance-from-center mask:** Multiply Voronoi by
+  `1.0 - length(UV - 0.5) * 2.0` so corruption grows FROM EDGES INWARD,
+  not uniformly.
+- **Emission in crevasses:** Color gradient from `#FF4500` (orange) to
+  `#8B0000` (dark red). Intensity modulated by
+  `sin(Time * 3.0) * 0.3 + 0.7` for pulsating ember effect.
+- **Roughness** = 0.85 (not 1.0 — keeps micro-reflections like real
+  obsidian).
+- **Metallic** = 0.8 (volcanic glass is partially metallic).
+- **Micro-fractures:** Secondary Voronoi layer at cell scale = 12.0,
+  very faint, added to normal channel for surface detail.
+
+---
+
+## 4. Transition (0.0 → 1.0)
+
+- All channels use Mix/Lerp nodes with `CorruptionLevel` as factor.
+- Color transition passes through deep purple (`#2D0A4E`) at the midpoint
+  (0.5) — use a curve or remap node, not linear.
+- At exactly 0.5: crystal "hesitates" — `CrystalBreathingController.ts`
+  adds ±2% scale oscillation externally.
+- Voronoi corruption appears progressively from edges inward thanks to the
+  distance mask.
+
+---
+
+## 5. Material Editor Node Graph
 
 ```
-[Time] ──────────────────→ [Voronoi UV Offset]
-                                    |
-[CorruptionLevel] ──┬──→ [Mix: Fresnel <-> Voronoi] ──→ [Base Color]
-                    |──→ [Mix: 0.0 <-> 1.0] ──────────→ [Roughness]
-                    |──→ [Mix: 0.2 <-> 0.8] ──────────→ [Metallic]
-                    └──→ [Multiply: Level x Edge] ────→ [Emission]
+[CorruptionLevel] ─── float uniform (Pin to Graph)
+        │
+        ├──→ [Mix: BaseColor]
+        │       A: Fresnel + GrabPass (Purity)
+        │       B: Voronoi masked + Black (Corruption)
+        │       Alpha: CorruptionLevel
+        │
+        ├──→ [Mix: Roughness]
+        │       A: 0.0    B: 0.85
+        │
+        ├──→ [Mix: Metallic]
+        │       A: 0.2    B: 0.8
+        │
+        └──→ [Multiply: Emission]
+                A: VoronoiEdge × EmberColor × PulseWave
+                B: CorruptionLevel
+                (Emission only active when CorruptionLevel > 0)
+
+[Time] ──→ [Voronoi UV Offset] (animate crevasse crawl)
+       ──→ [sin(Time * 3.0)] (ember pulse)
+
+[UV] ──→ [Distance from Center] ──→ [Edge Mask] ──→ [Voronoi Multiplier]
 ```
+
+---
+
+## 6. Geometry Specifications
+
+- **Mesh:** Icosahedron (20 faces, ~5 KB).
+- **Optional:** Normal Map baked from subdivided version in Blender (for
+  surface micro-detail).
+- **Total triangle budget** for crystal: < 100 triangles.
+- **Total texture budget:** 0 MB.
+
+---
+
+## 7. Performance Notes
+
+- **Target:** Stable 30 FPS on 5-year-old smartphones.
+- No real-time shadows on the crystal (use baked or none).
+- Single material, single pass.
+- Grab Pass for refraction is the most expensive operation — test on
+  low-end devices first.
